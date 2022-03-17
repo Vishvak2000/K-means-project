@@ -1,0 +1,281 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+
+library(dplyr)
+library(mice)
+library(ggplot2)
+library(reshap2)
+library(RColorBrewer)
+library(dendextend)
+library(cluster)
+gene_counts <- read.table("yeast.tsv")
+
+```
+
+
+##Missing Data
+Impute missing data using predictive mean matching imputation method from mice package. Predictive mean matching or "pmm" calculates a predicted values for a given missing value by randomly selecting from candidate "donors" that have data.   
+
+```{r}
+md.pattern(gene_counts, rotate.names = TRUE)
+imputed <- mice(gene_counts,m=1,method = "pmm",seed=123)
+densityplot(imputed)
+data <- complete(imputed)
+
+#plotting data
+melted <- data
+melted$id <- as.factor(1:nrow(data))
+melted <- melt(melted,id.var = "id")
+melted$time <- substring(melted$variable,2)
+melted <- arrange(melted,time)
+str(melted)
+ggplot(melted,aes(x=time,y=value)) + geom_line(aes(group=id,color=id))  + theme_classic() + theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),legend.position = "none")  
+```
+
+k++initializer as follows:
+
+For the first centroid, choose a random gene’s values as the centroids.
+Calculate squared euclidean distances between each of the genes in the dataset and the initial cluster.
+Use these distances as a weighted probability distribution to sample a new centroid from the data. This ensures that the next centroid will likely be far away from the previous centroid and therefore, initialise a more meaningful starting point for another cluster.
+Repeat steps (2) and (3) until k centroids are generated, using the previously generated centroid as the reference for step (2)
+```{r}
+
+kpp_centroids <- function(data,k) {
+centroids <- matrix(nrow = k, ncol=ncol(data))
+distances <- matrix(nrow=nrow(data),ncol=1)
+centroids[1,] <- as.double(sample_n(data,1)[1,])
+if(k ==1) {return(centroids)}
+for(j in 2:k){
+  for(i in 1:nrow(data)) {
+  distances[i] <- ((stats::dist(rbind(centroids[j-1,],data[i,]),method="euclidean"))[1])^2
+  }
+  centroids[j,] <- as.double(sample_n(data,1,weight=distances)[1,])
+}
+return(centroids)
+}
+
+
+compute_distances <- function(data,k,centroids) {
+distances <- matrix(nrow=nrow(data),ncol=k)
+for(j in 1:k){
+for(i in 1:nrow(data)){
+  distances[i,j] <- ((stats::dist(rbind(centroids[j,],data[i,]),method="euclidean"))[1])^2
+}
+}
+return(distances)
+}
+
+get_assignments <- function(distances) {
+assignments <- matrix(nrow=nrow(distances),ncol=1)
+for(i in 1:nrow(distances)){
+  assignments[i] <- which.min(distances[i,])
+}
+  return(assignments)
+}
+
+
+kmeans <- function(data,k){
+centroids <- kpp_centroids(data,k)
+old_assignments <- matrix(0,nrow=nrow(data),ncol=1)
+iter=0
+repeat{
+distances <- compute_distances(data,k,centroids)
+new_assignments <- get_assignments(distances)
+if (identical(new_assignments,old_assignments)) {
+  break
+} else {
+centroids <- cbind(data,new_assignments) %>%
+  aggregate(list(new_assignments),mean) %>%
+  select(-c(Group.1,new_assignments)) %>% as.matrix()
+old_assignments <- new_assignments
+iter = iter+1
+}
+}
+wss <- WSS(data,centroids,new_assignments)
+print(paste("For K =",k,"; niter =",iter))
+print(wss)
+return(list(centroids,new_assignments,(sum(wss)/k)))
+}
+
+WSS <- function(data,centroids,assignments){
+wss <- matrix(nrow=1,ncol=nrow(centroids))
+
+  for(i in 1:nrow(centroids)) {
+    d <- data[assignments==i,]
+    distances <- matrix(nrow=nrow(d),ncol=1)
+    for(j in 1:nrow(d)) {
+      distances[j,1] <- ((stats::dist(rbind(centroids[i,],d[j,]),method="euclidean"))[1])^2
+    }
+    wss[1,i] <- (sum(distances))/(nrow(d))
+  }
+  return(wss)
+}
+
+elbows <- sapply(kmeans_list, "[[", 3)  
+plot(elbows)
+
+kmeans_list <- c()
+for(k in 1:7) {
+kmeans_list[[k]] <- kmeans(data,k) 
+}
+
+
+
+plots <- c()
+size_mapping <- c(Yes=2,No=0.25)
+alpha_mapping <- c(Yes=1,No=1/3)
+for(k in 1:7){
+  n <- nrow(data)
+
+  centroids <- bind_cols(kmeans_list[[k]][[1]],c(paste("centroid",c(1:k)))) %>% rename(assignments=`...8`) %>% mutate(centroid="Yes")
+  plots[[k]] <- data %>% mutate(assignments=factor(kmeans_list[[k]][[2]])) %>% mutate(centroid="No") %>% 
+    bind_rows(centroids) %>%
+    mutate(id=1:(n+nrow(centroids))) %>%
+    melt(id.vars = c("id","assignments","centroid")) %>%
+    mutate(time=substring(variable,2)) %>%  
+    arrange(time) %>%
+  ggplot(aes(x=time,y=value,color=assignments)) + geom_line(aes(group=id,size=centroid,alpha=centroid)) + scale_size_manual(values=size_mapping) + scale_alpha_manual(values=alpha_mapping) +theme_minimal() + scale_fill_distiller(palette = "Set2")
+}
+
+plots
+
+
+```
+
+
+##k=2 plots
+
+```{r}
+
+as.data.frame(kmeans_list[[2]][[3]]) %>% group_by(V1) %>% summarise(total=n()) 
+
+squared_euclidian_c1.2 <- function(x) {
+  t<- ((stats::dist(rbind(kmeans_list[[2]][[1]][1,],x),method="euclidean"))[1])^2
+  return(t)
+} 
+
+squared_euclidian_c2.2 <- function(x) {
+  t<- ((stats::dist(rbind(kmeans_list[[2]][[1]][2,],x),method="euclidean"))[1])^2
+  return(t)
+} 
+
+distance_to_c1 <- apply(data,1,squared_euclidian_c1.2)
+distance_to_c2 <- apply(data,1,squared_euclidian_c2.2)
+k2_outliers <- as.data.frame(cbind(distance_to_c1,distance_to_c2)) %>% mutate(assignment=factor(kmeans_list[[2]][[2]]))
+
+ggplot(k2_outliers,aes(x=distance_to_c1,y=distance_to_c2,color=assignment)) + geom_point() + geom_abline(intercept=0,slope=1) + theme_classic()
+```
+
+##k=5 plots
+
+```{r}
+as.data.frame(kmeans_list[[5]][[3]]) %>% group_by(V1) %>% summarise(total=n()) 
+squared_euclidian_c1.5 <- function(x) {
+  t<- ((stats::dist(rbind(kmeans_list[[5]][[1]][1,],x),method="euclidean"))[1])^2
+  return(t)
+} 
+
+
+
+squared_euclidian_c2.5 <- function(x) {
+  t<- ((stats::dist(rbind(kmeans_list[[5]][[1]][2,],x),method="euclidean"))[1])^2
+  return(t)
+} 
+
+squared_euclidian_c3.5 <- function(x) {
+  t<- ((stats::dist(rbind(kmeans_list[[5]][[1]][3,],x),method="euclidean"))[1])^2
+  return(t)
+} 
+
+squared_euclidian_c4.5 <- function(x) {
+  t<- ((stats::dist(rbind(kmeans_list[[5]][[1]][4,],x),method="euclidean"))[1])^2
+  return(t)
+} 
+
+squared_euclidian_c5.5 <- function(x) {
+  t<- ((stats::dist(rbind(kmeans_list[[5]][[1]][5,],x),method="euclidean"))[1])^2
+  return(t)
+} 
+
+
+distance_to_c1.5 <- apply(data,1,squared_euclidian_c1.5)
+distance_to_c2.5 <- apply(data,1,squared_euclidian_c2.5)
+distance_to_c3.5 <- apply(data,1,squared_euclidian_c3.5)
+distance_to_c4.5 <- apply(data,1,squared_euclidian_c4.5)
+distance_to_c5.5 <- apply(data,1,squared_euclidian_c5.5)
+k5_outliers <- as.data.frame(cbind(distance_to_c1.5,distance_to_c2.5,distance_to_c3.5,distance_to_c4.5,distance_to_c5.5)) %>% mutate(assignment=factor(kmeans_list[[5]][[2]]))
+
+ggplot(k5_outliers,aes(x=distance_to_c4.5,y=distance_to_c5.5,color=assignment)) + geom_point() + geom_abline(intercept=0,slope=1) + theme_classic()
+ggplot(k5_outliers,aes(x=distance_to_c1.5,y=distance_to_c2.5,color=assignment)) + geom_point() + geom_abline(intercept=0,slope=1) + theme_classic()
+ggplot(k5_outliers,aes(x=distance_to_c2.5,y=distance_to_c3.5,color=assignment)) + geom_point() + geom_abline(intercept=0,slope=1) + theme_classic()
+ggplot(k5_outliers,aes(x=distance_to_c1.5,y=distance_to_c3.5,color=assignment)) + geom_point() + geom_abline(intercept=0,slope=1) + theme_classic()
+
+
+
+```
+
+##Hierarchial Clustering
+```{r}
+library(cluster)
+library(dendextend)
+dist_mat <- dist(data) #uses euc as default
+divisive.clust <- diana(as.matrix(dist_mat), 
+                  diss = TRUE, keep.diss = TRUE,metric="euclidian")
+plot(divisive.clust, main = "Divisive H-clustering",labels=F,ylab="")
+
+dend1 <- color_branches(as.dendrogram(divisive.clust),k=4)
+plot(dend1,labels=FALSE)
+
+cut_tree <- c()
+for(i in 1:7){
+cut_tree[[i]] <- cutree(as.hclust(divisive.clust),k=i)
+}
+
+h_centroids <- c()
+for(i in 1:7){
+  temp2 <- data %>% mutate(assignments=(cut_tree[[i]]))
+  h_centroids[[i]] <- aggregate(temp2,list(temp2$assignments),mean) %>% select(-c(Group.1,assignments)) %>% as.matrix()
+
+}
+
+for(i in 1:7) {
+as.data.frame(cut_tree[[i]]) %>% group_by(`cut_tree[[i]]`) %>% summarise(total=n()) %>% print()
+}
+
+WSS_avg_hclust <- c()
+for(i in 1:7){
+nt <- WSS(data,h_centroids[[i]],as.matrix(cut_tree[[i]]))
+print(nt)
+WSS_avg_hclust[[i]] <- sum(nt)/i
+print(sum(nt)/i)
+}
+
+
+plot(as.numeric(WSS_avg_hclust))
+
+centroids <- bind_cols(h_centroids[[4]],c(paste("centroid",c(1:4)))) %>% rename(assignments=`...8`) %>% mutate(centroid="Yes")
+  plots_4.h <- data %>% mutate(assignments=factor(cut_tree[[4]])) %>% mutate(centroid="No") %>% 
+    bind_rows(centroids) %>%
+    mutate(id=1:(n+nrow(centroids))) %>%
+    melt(id.vars = c("id","assignments","centroid")) %>%
+    mutate(time=substring(variable,2)) %>%  
+    arrange(time) %>%
+  ggplot(aes(x=time,y=value,color=assignments)) + geom_line(aes(group=id,size=centroid,alpha=centroid)) + scale_size_manual(values=size_mapping) + scale_alpha_manual(values=alpha_mapping) +theme_minimal() + scale_fill_distiller(palette = "Set2")
+  
+plots_4.h + ggtitle("h-clustering cut at k=4")
+
+
+kmeans_vs_hclust <- prop.table(table(kmeans_list[[5]][[2]],cut_tree[[4]]),margin = 1)*100
+kmeans_vs_hclust <- as.data.frame(kmeans_vs_hclust)
+colnames(kmeans_vs_hclust) <- c("kmeans_clusters","h_clusters","percent")
+ggplot(kmeans_vs_hclust,aes(y=kmeans_clusters,x=h_clusters,fill=percent)) + geom_tile() + geom_text(aes(fill=kmeans_vs_hclust$percent,label = round(percent, 2)))+ scale_fill_gradient(low="white",high="purple") + theme_bw()
+```
